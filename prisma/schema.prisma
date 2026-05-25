@@ -1,0 +1,133 @@
+// Undercover — Prisma schema
+// PostgreSQL 18 via Docker in development, Neon PostgreSQL in production.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Auth.js v5 models ─────────────────────────────────────
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  color         String    @default("#FFD43B")
+  noRepeat      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts  Account[]
+  sessions  Session[]
+  players   Player[]
+  games     Game[]
+  usedPairs UsedWordPair[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── Game models ───────────────────────────────────────────
+model WordPair {
+  id             String   @id @default(cuid())
+  civilianWord   String
+  undercoverWord String
+  category       String?
+  createdAt      DateTime @default(now())
+
+  used  UsedWordPair[]
+  games Game[]
+
+  @@unique([civilianWord, undercoverWord])
+}
+
+model UsedWordPair {
+  id         String   @id @default(cuid())
+  userId     String
+  wordPairId String
+  usedAt     DateTime @default(now())
+
+  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pair WordPair @relation(fields: [wordPairId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, wordPairId])
+}
+
+/// A recurring player profile owned by a Google user. The host's own profile
+/// has isOwner = true. Enables setup autocomplete and per-player history.
+model Player {
+  id        String   @id @default(cuid())
+  ownerId   String
+  name      String
+  color     String   @default("#FFD43B")
+  isOwner   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  owner User              @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  games GameParticipant[]
+
+  @@unique([ownerId, name])
+}
+
+model Game {
+  id         String    @id @default(cuid())
+  hostUserId String
+  wordPairId String
+  winner     String? // 'civils' | 'imposteurs' | null si abandonnée
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  host         User              @relation(fields: [hostUserId], references: [id], onDelete: Cascade)
+  pair         WordPair          @relation(fields: [wordPairId], references: [id])
+  participants GameParticipant[]
+}
+
+model GameParticipant {
+  id               String  @id @default(cuid())
+  gameId           String
+  playerId         String
+  role             String // 'civil' | 'under' | 'white'
+  wasEliminated    Boolean @default(false)
+  eliminationRound Int?
+
+  game   Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, playerId])
+}
