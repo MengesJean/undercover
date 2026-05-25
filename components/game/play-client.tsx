@@ -444,17 +444,27 @@ function RevealScreen({
   const [idx, setIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [seen, setSeen] = useState(false);
+  const [transitioning, setTransitioning] = useState(false);
 
   const player = roster[idx];
   const isLast = idx === roster.length - 1;
 
   const next = () => {
-    if (isLast) onDone();
-    else {
-      setIdx(idx + 1);
-      setFlipped(false);
-      setSeen(false);
+    if (transitioning) return;
+    if (isLast) {
+      onDone();
+      return;
     }
+    // Flip the card back first, then swap to the next player AFTER the flip
+    // animation finishes — otherwise the new player's role briefly shows
+    // through the rotating backface.
+    setTransitioning(true);
+    setFlipped(false);
+    setTimeout(() => {
+      setIdx((i) => i + 1);
+      setSeen(false);
+      setTransitioning(false);
+    }, 700);
   };
 
   return (
@@ -499,7 +509,7 @@ function RevealScreen({
         <div className="flip-perspective flex flex-1 items-center justify-center">
           <div
             onClick={() => {
-              if (!seen) {
+              if (!seen && !transitioning) {
                 setFlipped(true);
                 setSeen(true);
               }
@@ -515,14 +525,15 @@ function RevealScreen({
         </div>
 
         <div className="mt-[14px] min-h-[44px] text-center text-[14px] font-medium text-[var(--color-sub)]">
-          {!flipped && "👆 Touche la carte pour révéler ton mot"}
+          {!flipped && !transitioning && "👆 Touche la carte pour révéler ton mot"}
+          {transitioning && "Passe le téléphone au joueur suivant…"}
           {flipped && !isLast && "Mémorise puis passe au joueur suivant"}
           {flipped && isLast && "Tous les joueurs ont leur mot !"}
         </div>
       </div>
 
       <div className="flex-shrink-0 px-5 pb-[34px] pt-[14px]">
-        <PrimaryButton disabled={!seen} onClick={next}>
+        <PrimaryButton disabled={!seen || transitioning} onClick={next}>
           {isLast ? "Commencer le débat" : "Joueur suivant"}
         </PrimaryButton>
       </div>
