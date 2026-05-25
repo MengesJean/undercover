@@ -20,9 +20,18 @@ import {
 import type { PlayerSuggestion } from "@/lib/actions/players";
 import { checkWinCondition, shuffle } from "@/lib/game-logic";
 
-type Phase = "configure" | "reveal" | "debate" | "vote" | "result";
+type Phase =
+  | "configure"
+  | "reveal"
+  | "debate"
+  | "vote"
+  | "result"
+  | "whiteGuess";
 type RosterEntry = StartedGame["roster"][number];
 type SeriesScores = Record<string, number>;
+
+const normaliseWord = (s: string) =>
+  s.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 
 const CHIP_FALLBACK_COLORS = [
   "#FFD43B",
@@ -52,6 +61,29 @@ export function PlayClient({
   const [seriesScores, setSeriesScores] = useState<SeriesScores>({});
   const [seriesGames, setSeriesGames] = useState(0);
   const [replayPending, setReplayPending] = useState(false);
+  // Mr. White elimination is special: he gets one last guess at the civilian
+  // word. While pending, the regular `winner` decision is held back.
+  const [pendingWhite, setPendingWhite] = useState<{
+    fallbackWinner: "civils" | "imposteurs" | null;
+  } | null>(null);
+  const [whiteGuessedRight, setWhiteGuessedRight] = useState(false);
+
+  const awardSeriesPoints = (
+    winningTeam: "civils" | "imposteurs",
+    roster: RosterEntry[],
+  ) => {
+    setSeriesScores((prev) => {
+      const next = { ...prev };
+      roster.forEach((p) => {
+        const isImpostor = p.role === "under" || p.role === "white";
+        const won = winningTeam === "imposteurs" ? isImpostor : !isImpostor;
+        if (won) next[p.name] = (next[p.name] ?? 0) + 1;
+        else if (!(p.name in next)) next[p.name] = 0;
+      });
+      return next;
+    });
+    setSeriesGames((n) => n + 1);
+  };
 
   const startSeriesGame = (g: StartedGame, cfg: StartGameInput) => {
     setGame(g);
@@ -60,6 +92,8 @@ export function PlayClient({
     setRound(1);
     setLastResult(null);
     setWinner(null);
+    setPendingWhite(null);
+    setWhiteGuessedRight(false);
     setPhase("reveal");
   };
 
@@ -127,38 +161,41 @@ export function PlayClient({
             setPhase("result");
             return;
           }
+          const eliminated = game.roster[eliminatedIdx];
           const newAlive = [...alive];
           newAlive[eliminatedIdx] = false;
           const win = checkWinCondition(game.roster, newAlive);
           // Update UI synchronously *before* any await — otherwise VoteScreen
           // re-renders with the shrunken aliveList while `voterPos` is stale.
           setAlive(newAlive);
-          setWinner(win.winner);
-          setPhase("result");
-          if (win.gameOver && win.winner) {
-            // Award a point to every player on the winning team.
-            const winningTeam = win.winner;
-            setSeriesScores((prev) => {
-              const next = { ...prev };
-              game.roster.forEach((p) => {
-                const isImpostor = p.role === "under" || p.role === "white";
-                const won =
-                  winningTeam === "imposteurs" ? isImpostor : !isImpostor;
-                if (won) next[p.name] = (next[p.name] ?? 0) + 1;
-                else if (!(p.name in next)) next[p.name] = 0;
-              });
-              return next;
-            });
-            setSeriesGames((n) => n + 1);
+
+          if (eliminated.role === "white") {
+            // Defer the win decision: Mr. White gets to guess the civil word
+            // from the next screen. The fallback winner (what would happen
+            // *without* the guess) is stashed for use if he gets it wrong.
+            setPendingWhite({ fallbackWinner: win.winner });
+            setWinner(null);
+          } else {
+            setWinner(win.winner);
+            if (win.gameOver && win.winner) {
+              awardSeriesPoints(win.winner, game.roster);
+            }
           }
-          // Persistence is fire-and-forget after the transition.
+          setPhase("result");
+
           try {
             await recordElimination({
               gameId: game.gameId,
               playerId: game.roster[eliminatedIdx].playerId,
               round,
             });
-            if (win.gameOver && win.winner) {
+            // Only record the winner when it's been finalised. For Mr. White
+            // we wait for the guess to resolve before persisting.
+            if (
+              eliminated.role !== "white" &&
+              win.gameOver &&
+              win.winner
+            ) {
               await recordGameWinner({
                 gameId: game.gameId,
                 winner: win.winner,
@@ -166,6 +203,41 @@ export function PlayClient({
             }
           } catch (e) {
             console.error("Failed to persist game state", e);
+          }
+        }}
+      />
+    );
+  }
+
+  if (phase === "whiteGuess") {
+    const elim =
+      lastResult?.eliminatedIdx != null
+        ? game.roster[lastResult.eliminatedIdx]
+        : null;
+    if (!elim) return null;
+    return (
+      <WhiteGuessScreen
+        whiteName={elim.name}
+        onSubmit={async (guess) => {
+          const correct =
+            normaliseWord(guess) === normaliseWord(game.pair.civilianWord);
+          const finalWinner: "civils" | "imposteurs" | null = correct
+            ? "imposteurs"
+            : (pendingWhite?.fallbackWinner ?? null);
+          setWhiteGuessedRight(correct);
+          setWinner(finalWinner);
+          if (finalWinner) awardSeriesPoints(finalWinner, game.roster);
+          setPendingWhite(null);
+          setPhase("result");
+          if (finalWinner) {
+            try {
+              await recordGameWinner({
+                gameId: game.gameId,
+                winner: finalWinner,
+              });
+            } catch (e) {
+              console.error("Failed to persist game winner", e);
+            }
           }
         }}
       />
@@ -180,15 +252,20 @@ export function PlayClient({
       tie={lastResult?.tie ?? false}
       gameOver={!!winner}
       winner={winner}
+      whiteGuessedRight={whiteGuessedRight}
+      civilianWord={game.pair.civilianWord}
+      whiteGuessPending={!!pendingWhite}
       seriesScores={seriesScores}
       seriesGames={seriesGames}
       replayPending={replayPending}
       onReplay={handleReplay}
+      onWhiteGuess={() => setPhase("whiteGuess")}
       onHome={() => router.push("/home")}
       onContinue={() => {
         // Mid-game (non-gameOver) "Manche suivante" button.
         setRound(round + 1);
         setLastResult(null);
+        setWhiteGuessedRight(false);
         setPhase("debate");
       }}
     />
@@ -1025,10 +1102,14 @@ function ResultScreen({
   tie,
   gameOver,
   winner,
+  whiteGuessedRight,
+  civilianWord,
+  whiteGuessPending,
   seriesScores,
   seriesGames,
   replayPending,
   onReplay,
+  onWhiteGuess,
   onContinue,
   onHome,
 }: {
@@ -1037,10 +1118,14 @@ function ResultScreen({
   tie: boolean;
   gameOver: boolean;
   winner: "civils" | "imposteurs" | null;
+  whiteGuessedRight: boolean;
+  civilianWord: string;
+  whiteGuessPending: boolean;
   seriesScores: SeriesScores;
   seriesGames: number;
   replayPending: boolean;
   onReplay: () => void;
+  onWhiteGuess: () => void;
   onContinue: () => void;
   onHome: () => void;
 }) {
@@ -1085,13 +1170,19 @@ function ResultScreen({
               <TrophyIcon color="var(--color-text)" />
             </div>
             <Sticker bg="var(--color-primary)" color="#FFFFFF" rot={-3}>
-              🎉 Victoire
+              {whiteGuessedRight ? "🎯 Mr. White s'en sort" : "🎉 Victoire"}
             </Sticker>
             <h2 className="m-0 mb-2 mt-[12px] font-display text-[44px] font-extrabold leading-[0.95] tracking-[-1.8px]">
               <span style={{ color: "var(--color-primary)" }}>{winLabel}</span>
               <br />
               l&apos;emportent
             </h2>
+            {whiteGuessedRight && (
+              <p className="m-0 mt-2 max-w-[320px] text-[14px] font-medium leading-[1.5] text-[var(--color-sub)]">
+                Mr. White a deviné le mot des civils :{" "}
+                <b style={{ color: "var(--color-text)" }}>{civilianWord}</b>.
+              </p>
+            )}
           </div>
 
           <div className="mt-6 text-left">
@@ -1279,9 +1370,112 @@ function ResultScreen({
       </div>
 
       <div className="flex-shrink-0 px-5 pb-[34px] pt-[14px]">
-        <PrimaryButton onClick={onContinue}>
-          {tie ? "Reprendre la manche" : "Manche suivante"}
+        {whiteGuessPending ? (
+          <PrimaryButton
+            onClick={onWhiteGuess}
+            color="var(--color-blue)"
+            deep="#1F38C9"
+          >
+            Dernier mot de Mr. White
+          </PrimaryButton>
+        ) : (
+          <PrimaryButton onClick={onContinue}>
+            {tie ? "Reprendre la manche" : "Manche suivante"}
+          </PrimaryButton>
+        )}
+      </div>
+    </Screen>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// MR. WHITE — last guess
+// ─────────────────────────────────────────────────────────────
+function WhiteGuessScreen({
+  whiteName,
+  onSubmit,
+}: {
+  whiteName: string;
+  onSubmit: (guess: string) => void;
+}) {
+  const [guess, setGuess] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = () => {
+    if (submitting) return;
+    setSubmitting(true);
+    onSubmit(guess);
+  };
+
+  return (
+    <Screen label="06b Mr. White devine">
+      <TopBar title="Mr. White" />
+      <div className="flex flex-1 flex-col px-6 pt-2">
+        <div className="text-center">
+          <Sticker bg="var(--color-blue)" color="#FFFFFF" rot={-3}>
+            🎯 Dernière chance
+          </Sticker>
+          <h2 className="m-0 mb-2 mt-3 font-display text-[42px] font-extrabold leading-[1] tracking-[-1.6px] text-[var(--color-text)]">
+            {whiteName}
+            <span style={{ color: "var(--color-blue)" }}>.</span>
+          </h2>
+          <p className="m-0 mx-auto max-w-[300px] text-[14px] font-medium leading-[1.5] text-[var(--color-sub)]">
+            Tu as été éliminé. Devine le mot des Civils — si tu trouves, les
+            imposteurs remportent la partie.
+          </p>
+        </div>
+
+        <div className="mt-6">
+          <label className="mb-2 block text-[12px] font-extrabold uppercase tracking-[1.2px] text-[var(--color-sub)]">
+            Ta proposition
+          </label>
+          <div
+            className="flex h-[60px] items-center rounded-[18px] bg-[var(--color-surface)] pl-[18px] pr-[5px]"
+            style={{
+              border: "2px solid var(--color-text)",
+              boxShadow: "0 4px 0 var(--color-text)",
+            }}
+          >
+            <input
+              autoFocus
+              value={guess}
+              onChange={(e) => setGuess(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSubmit();
+              }}
+              placeholder="Le mot des civils…"
+              className="flex-1 border-none bg-transparent font-display text-[18px] font-bold text-[var(--color-text)] outline-none placeholder:font-medium placeholder:text-[var(--color-faint)]"
+            />
+          </div>
+          <p className="mt-3 text-[12px] font-medium leading-[1.5] text-[var(--color-faint)]">
+            La casse et les accents ne comptent pas.
+          </p>
+        </div>
+
+        <div className="flex-1" />
+      </div>
+
+      <div className="flex flex-shrink-0 flex-col gap-[10px] px-5 pb-[34px] pt-[14px]">
+        <PrimaryButton
+          onClick={handleSubmit}
+          disabled={!guess.trim() || submitting}
+          color="var(--color-blue)"
+          deep="#1F38C9"
+        >
+          Valider ma réponse
         </PrimaryButton>
+        <button
+          onClick={() => {
+            if (submitting) return;
+            setSubmitting(true);
+            onSubmit("");
+          }}
+          disabled={submitting}
+          className="h-[48px] w-full cursor-pointer rounded-[16px] bg-transparent font-display text-[14px] font-semibold text-[var(--color-sub)]"
+          style={{ border: "1.5px solid var(--color-line)" }}
+        >
+          Passer mon tour
+        </button>
       </div>
     </Screen>
   );
