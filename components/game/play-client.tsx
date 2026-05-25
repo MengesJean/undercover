@@ -902,14 +902,6 @@ function VoteScreen({
   const voter = aliveList[voterPos];
   const isLast = voterPos === aliveList.length - 1;
 
-  const tally = useMemo(() => {
-    const m: Record<number, number> = {};
-    Object.values(votes).forEach((t) => {
-      m[t] = (m[t] || 0) + 1;
-    });
-    return m;
-  }, [votes]);
-
   if (!voter) return null;
 
   const vote = (targetIdx: number) => {
@@ -974,7 +966,6 @@ function VoteScreen({
           {aliveList
             .filter((p) => p.idx !== voter.idx)
             .map((p) => {
-              const count = tally[p.idx] || 0;
               const isSelected = votes[voter.idx] === p.idx;
               return (
                 <button
@@ -1006,28 +997,6 @@ function VoteScreen({
                     {p.name[0]}
                   </div>
                   <div className="flex-1 text-[17px] font-bold">{p.name}</div>
-                  {count > 0 && (
-                    <div
-                      className="flex items-center gap-[6px] rounded-[10px] px-[10px] py-1"
-                      style={{
-                        background: "var(--color-bg)",
-                        border: "1px solid var(--color-line)",
-                      }}
-                    >
-                      <div className="flex gap-[2px]">
-                        {Array.from({ length: count }).map((_, i) => (
-                          <div
-                            key={i}
-                            className="h-[14px] w-[6px] rounded-[1px]"
-                            style={{ background: "var(--color-primary)" }}
-                          />
-                        ))}
-                      </div>
-                      <div className="font-mono text-[12px] font-semibold text-[var(--color-sub)]">
-                        {count}
-                      </div>
-                    </div>
-                  )}
                 </button>
               );
             })}
