@@ -71,16 +71,50 @@ export async function startGame(input: StartGameInput): Promise<StartedGame> {
   }
   if (!pair) throw new Error("NO_WORD_PAIRS");
 
-  // 2. Assign roles server-side.
+  // 2. Anti-streak: anyone who was impostor in the last 2 finished games is
+  // excluded from the impostor pool (assignRoles falls back if needed). This
+  // caps any player at 2 consecutive impostor games — the 3rd is forced onto
+  // someone else when possible.
+  const last2 = await prisma.game.findMany({
+    where: { hostUserId: userId, finishedAt: { not: null } },
+    orderBy: { finishedAt: "desc" },
+    take: 2,
+    select: {
+      participants: {
+        where: { role: { in: ["under", "white"] } },
+        select: { player: { select: { name: true } } },
+      },
+    },
+  });
+  const impostorCounts = new Map<string, number>();
+  last2.forEach((g) => {
+    g.participants.forEach((p) => {
+      impostorCounts.set(
+        p.player.name,
+        (impostorCounts.get(p.player.name) ?? 0) + 1,
+      );
+    });
+  });
+  const excludeNames = new Set(
+    [...impostorCounts.entries()]
+      .filter(([, count]) => count >= 2)
+      .map(([name]) => name),
+  );
+  const excludeIndices = input.playerNames
+    .map((name, i) => (excludeNames.has(name) ? i : -1))
+    .filter((i) => i >= 0);
+
+  // 3. Assign roles server-side.
   const assigned = assignRoles(
     input.playerNames,
     pair.civilianWord,
     pair.undercoverWord,
     input.numUndercover,
     input.numMrWhite,
+    excludeIndices,
   );
 
-  // 3. Upsert player profiles + create game + participants + record usage.
+  // 4. Upsert player profiles + create game + participants + record usage.
   const players = await Promise.all(
     input.playerNames.map((name, i) =>
       prisma.player.upsert({

@@ -17,12 +17,22 @@ export function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
+/**
+ * Assign roles to players.
+ *
+ * `excludeIndices` lists players who should NOT be impostors this game if at
+ * all possible (typically: people who were impostors in the last N games).
+ * The impostor slots are filled from the non-excluded pool first; if there
+ * aren't enough non-excluded eligible players to fill every slot, the
+ * remaining slots fall back to the excluded pool so we never fail to start.
+ */
 export function assignRoles(
   playerNames: string[],
   civilianWord: string,
   undercoverWord: string,
   numUndercover: number,
   numMrWhite: number,
+  excludeIndices: number[] = [],
 ): AssignedRole[] {
   if (playerNames.length < 3) {
     throw new Error("At least 3 players are required");
@@ -34,10 +44,18 @@ export function assignRoles(
     throw new Error("Too many impostors for the player count");
   }
 
-  const indices = shuffle(playerNames.map((_, i) => i));
-  const underSet = new Set(indices.slice(0, numUndercover));
+  const numImpostors = numUndercover + numMrWhite;
+  const allIndices = playerNames.map((_, i) => i);
+  const excluded = new Set(excludeIndices);
+  const preferred = shuffle(allIndices.filter((i) => !excluded.has(i)));
+  const fallback = shuffle(allIndices.filter((i) => excluded.has(i)));
+
+  // Fill impostor slots from the preferred pool first; spill to fallback only
+  // when the preferred pool runs short.
+  const impostors = shuffle([...preferred, ...fallback].slice(0, numImpostors));
+  const underSet = new Set(impostors.slice(0, numUndercover));
   const whiteSet = new Set(
-    indices.slice(numUndercover, numUndercover + numMrWhite),
+    impostors.slice(numUndercover, numUndercover + numMrWhite),
   );
 
   return playerNames.map((name, i) => {
