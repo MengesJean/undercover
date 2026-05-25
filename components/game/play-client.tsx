@@ -15,12 +15,14 @@ import {
   recordElimination,
   recordGameWinner,
   type StartedGame,
+  type StartGameInput,
 } from "@/lib/actions/game";
 import type { PlayerSuggestion } from "@/lib/actions/players";
-import { checkWinCondition } from "@/lib/game-logic";
+import { checkWinCondition, shuffle } from "@/lib/game-logic";
 
 type Phase = "configure" | "reveal" | "debate" | "vote" | "result";
 type RosterEntry = StartedGame["roster"][number];
+type SeriesScores = Record<string, number>;
 
 const CHIP_FALLBACK_COLORS = [
   "#FFD43B",
@@ -39,24 +41,50 @@ export function PlayClient({
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>("configure");
   const [game, setGame] = useState<StartedGame | null>(null);
+  const [gameConfig, setGameConfig] = useState<StartGameInput | null>(null);
   const [alive, setAlive] = useState<boolean[]>([]);
   const [round, setRound] = useState(1);
   const [winner, setWinner] = useState<"civils" | "imposteurs" | null>(null);
   const [lastResult, setLastResult] = useState<
     { eliminatedIdx: number | null; tie: boolean } | null
   >(null);
+  // Cumulative wins across consecutive games with the same roster.
+  const [seriesScores, setSeriesScores] = useState<SeriesScores>({});
+  const [seriesGames, setSeriesGames] = useState(0);
+  const [replayPending, setReplayPending] = useState(false);
+
+  const startSeriesGame = (g: StartedGame, cfg: StartGameInput) => {
+    setGame(g);
+    setGameConfig(cfg);
+    setAlive(g.roster.map(() => true));
+    setRound(1);
+    setLastResult(null);
+    setWinner(null);
+    setPhase("reveal");
+  };
+
+  const handleReplay = async () => {
+    if (!gameConfig || replayPending) return;
+    setReplayPending(true);
+    try {
+      const result = await startGame(gameConfig);
+      startSeriesGame(result, gameConfig);
+    } catch (e) {
+      console.error("Failed to restart game", e);
+    } finally {
+      setReplayPending(false);
+    }
+  };
 
   if (phase === "configure") {
     return (
       <ConfigureScreen
         knownPlayers={knownPlayers}
-        onStarted={(g) => {
-          setGame(g);
-          setAlive(g.roster.map(() => true));
-          setRound(1);
-          setLastResult(null);
-          setWinner(null);
-          setPhase("reveal");
+        onStarted={(g, cfg) => {
+          // Brand-new series — reset cumulative scores.
+          setSeriesScores({});
+          setSeriesGames(0);
+          startSeriesGame(g, cfg);
         }}
         onCancel={() => router.push("/home")}
       />
@@ -107,6 +135,22 @@ export function PlayClient({
           setAlive(newAlive);
           setWinner(win.winner);
           setPhase("result");
+          if (win.gameOver && win.winner) {
+            // Award a point to every player on the winning team.
+            const winningTeam = win.winner;
+            setSeriesScores((prev) => {
+              const next = { ...prev };
+              game.roster.forEach((p) => {
+                const isImpostor = p.role === "under" || p.role === "white";
+                const won =
+                  winningTeam === "imposteurs" ? isImpostor : !isImpostor;
+                if (won) next[p.name] = (next[p.name] ?? 0) + 1;
+                else if (!(p.name in next)) next[p.name] = 0;
+              });
+              return next;
+            });
+            setSeriesGames((n) => n + 1);
+          }
           // Persistence is fire-and-forget after the transition.
           try {
             await recordElimination({
@@ -136,12 +180,13 @@ export function PlayClient({
       tie={lastResult?.tie ?? false}
       gameOver={!!winner}
       winner={winner}
+      seriesScores={seriesScores}
+      seriesGames={seriesGames}
+      replayPending={replayPending}
+      onReplay={handleReplay}
       onHome={() => router.push("/home")}
       onContinue={() => {
-        if (winner) {
-          router.push("/home");
-          return;
-        }
+        // Mid-game (non-gameOver) "Manche suivante" button.
         setRound(round + 1);
         setLastResult(null);
         setPhase("debate");
@@ -159,7 +204,7 @@ function ConfigureScreen({
   onCancel,
 }: {
   knownPlayers: PlayerSuggestion[];
-  onStarted: (g: StartedGame) => void;
+  onStarted: (g: StartedGame, cfg: StartGameInput) => void;
   onCancel: () => void;
 }) {
   const me = knownPlayers.find((p) => p.isOwner);
@@ -205,12 +250,13 @@ function ConfigureScreen({
     setError(null);
     startTransition(async () => {
       try {
-        const result = await startGame({
+        const cfg: StartGameInput = {
           playerNames: players,
           numUndercover,
           numMrWhite,
-        });
-        onStarted(result);
+        };
+        const result = await startGame(cfg);
+        onStarted(result, cfg);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Erreur inconnue");
       }
@@ -834,16 +880,21 @@ function VoteScreen({
   onBack: () => void;
   onResult: (r: { eliminatedIdx: number | null; tie: boolean }) => void;
 }) {
-  const aliveList = roster
-    .map((p, i) => ({ ...p, idx: i }))
-    .filter((p) => alive[p.idx]);
+  const aliveList = useMemo(
+    () =>
+      roster
+        .map((p, i) => ({ ...p, idx: i }))
+        .filter((p) => alive[p.idx]),
+    [roster, alive],
+  );
+  // Randomise WHO votes next on each new vote screen — independent of the
+  // roster order so people can't game the pass-and-play sequence.
+  const voterOrder = useMemo(() => shuffle(aliveList), [aliveList]);
   const [votes, setVotes] = useState<Record<number, number>>({});
   const [voterPos, setVoterPos] = useState(0);
 
-  const voter = aliveList[voterPos];
-  const isLast = voterPos === aliveList.length - 1;
-
-  if (!voter) return null;
+  const voter = voterOrder[voterPos];
+  const isLast = voterPos === voterOrder.length - 1;
 
   const tally = useMemo(() => {
     const m: Record<number, number> = {};
@@ -852,6 +903,8 @@ function VoteScreen({
     });
     return m;
   }, [votes]);
+
+  if (!voter) return null;
 
   const vote = (targetIdx: number) => {
     const newVotes = { ...votes, [voter.idx]: targetIdx };
@@ -997,6 +1050,10 @@ function ResultScreen({
   tie,
   gameOver,
   winner,
+  seriesScores,
+  seriesGames,
+  replayPending,
+  onReplay,
   onContinue,
   onHome,
 }: {
@@ -1005,6 +1062,10 @@ function ResultScreen({
   tie: boolean;
   gameOver: boolean;
   winner: "civils" | "imposteurs" | null;
+  seriesScores: SeriesScores;
+  seriesGames: number;
+  replayPending: boolean;
+  onReplay: () => void;
   onContinue: () => void;
   onHome: () => void;
 }) {
@@ -1023,34 +1084,120 @@ function ResultScreen({
 
   if (gameOver && winner) {
     const winLabel = winner === "civils" ? "Les Civils" : "Les Imposteurs";
+    const ranking = roster
+      .map((p) => ({
+        playerId: p.playerId,
+        name: p.name,
+        color: p.color,
+        score: seriesScores[p.name] ?? 0,
+      }))
+      .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+    const topScore = ranking[0]?.score ?? 0;
+
     return (
       <Screen label="07 Fin de partie">
         <TopBar title="Fin de partie" />
-        <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
-          <div
-            className="mb-6 flex h-[100px] w-[100px] items-center justify-center rounded-full"
+        <div className="flex flex-1 flex-col overflow-auto px-6 pt-2 text-center">
+          <div className="flex flex-col items-center">
+            <div
+              className="mb-4 flex h-[88px] w-[88px] items-center justify-center rounded-full"
+              style={{
+                background: "var(--color-lemon)",
+                border: "2.5px solid var(--color-text)",
+                boxShadow: "4px 4px 0 var(--color-text)",
+              }}
+            >
+              <TrophyIcon color="var(--color-text)" />
+            </div>
+            <Sticker bg="var(--color-primary)" color="#FFFFFF" rot={-3}>
+              🎉 Victoire
+            </Sticker>
+            <h2 className="m-0 mb-2 mt-[12px] font-display text-[44px] font-extrabold leading-[0.95] tracking-[-1.8px]">
+              <span style={{ color: "var(--color-primary)" }}>{winLabel}</span>
+              <br />
+              l&apos;emportent
+            </h2>
+          </div>
+
+          <div className="mt-6 text-left">
+            <div className="mb-3 flex items-baseline justify-between">
+              <div className="text-[12px] font-extrabold uppercase tracking-[1.2px] text-[var(--color-sub)]">
+                Classement
+              </div>
+              <div className="font-mono text-[12px] font-semibold text-[var(--color-sub)]">
+                {seriesGames} {seriesGames > 1 ? "parties" : "partie"}
+              </div>
+            </div>
+            <div
+              className="overflow-hidden rounded-[18px] bg-[var(--color-surface)]"
+              style={{
+                border: "2px solid var(--color-text)",
+                boxShadow: "4px 4px 0 var(--color-text)",
+              }}
+            >
+              {ranking.map((p, i) => {
+                const isLeader = p.score > 0 && p.score === topScore;
+                return (
+                  <div
+                    key={p.playerId}
+                    className="flex items-center gap-3 px-4 py-3"
+                    style={{
+                      borderTop:
+                        i === 0 ? "none" : "1.5px solid var(--color-line)",
+                      background: isLeader
+                        ? "var(--color-lemon-dim)"
+                        : "transparent",
+                    }}
+                  >
+                    <div className="w-6 font-mono text-[14px] font-bold text-[var(--color-sub)]">
+                      {i + 1}.
+                    </div>
+                    <div
+                      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full font-display text-[15px] font-extrabold text-[var(--color-text)]"
+                      style={{
+                        background: p.color,
+                        border: "1.5px solid var(--color-text)",
+                      }}
+                    >
+                      {p.name[0]?.toUpperCase()}
+                    </div>
+                    <div className="flex-1 text-[16px] font-bold text-[var(--color-text)]">
+                      {p.name}
+                    </div>
+                    <div
+                      className="font-display text-[22px] font-extrabold leading-none"
+                      style={{
+                        color: isLeader
+                          ? "var(--color-primary)"
+                          : "var(--color-text)",
+                      }}
+                    >
+                      {p.score}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="h-6" />
+        </div>
+        <div className="flex flex-shrink-0 flex-col gap-[10px] px-5 pb-[34px] pt-2">
+          <PrimaryButton onClick={onReplay} disabled={replayPending}>
+            {replayPending
+              ? "Préparation…"
+              : "Rejouer avec les mêmes joueurs"}
+          </PrimaryButton>
+          <button
+            onClick={onHome}
+            className="h-[54px] w-full cursor-pointer rounded-[18px] bg-[var(--color-surface)] font-display text-[15px] font-semibold text-[var(--color-text)]"
             style={{
-              background: "var(--color-lemon)",
-              border: "2.5px solid var(--color-text)",
-              boxShadow: "4px 4px 0 var(--color-text)",
+              border: "1.5px solid var(--color-line)",
+              boxShadow: "0 2px 0 rgba(26,20,24,0.04)",
             }}
           >
-            <TrophyIcon color="var(--color-text)" />
-          </div>
-          <Sticker bg="var(--color-primary)" color="#FFFFFF" rot={-3}>
-            🎉 Victoire
-          </Sticker>
-          <h2 className="m-0 mb-3 mt-[14px] font-display text-[56px] font-extrabold leading-[0.95] tracking-[-2.2px]">
-            <span style={{ color: "var(--color-primary)" }}>{winLabel}</span>
-            <br />
-            l&apos;emportent
-          </h2>
-          <p className="m-0 max-w-[280px] text-[15px] font-medium leading-[1.5] text-[var(--color-sub)]">
-            La vérité a finalement éclaté. Bien joué.
-          </p>
-        </div>
-        <div className="flex flex-col gap-[10px] px-5 pb-[34px]">
-          <PrimaryButton onClick={onHome}>Retour accueil</PrimaryButton>
+            Retour accueil
+          </button>
         </div>
       </Screen>
     );
