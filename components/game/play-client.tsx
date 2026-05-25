@@ -714,9 +714,17 @@ function DebateScreen({
   onBack: () => void;
   onVote: () => void;
 }) {
-  const aliveList = roster
-    .map((p, i) => ({ ...p, idx: i }))
-    .filter((p) => alive[p.idx]);
+  // Randomise the speaking order on each new debate screen so the
+  // first/last speaker advantage doesn't always fall on the same people.
+  const aliveList = useMemo(
+    () =>
+      shuffle(
+        roster
+          .map((p, i) => ({ ...p, idx: i }))
+          .filter((p) => alive[p.idx]),
+      ),
+    [roster, alive],
+  );
   const [activeIdx, setActiveIdx] = useState(0);
 
   return (
@@ -880,21 +888,14 @@ function VoteScreen({
   onBack: () => void;
   onResult: (r: { eliminatedIdx: number | null; tie: boolean }) => void;
 }) {
-  const aliveList = useMemo(
-    () =>
-      roster
-        .map((p, i) => ({ ...p, idx: i }))
-        .filter((p) => alive[p.idx]),
-    [roster, alive],
-  );
-  // Randomise WHO votes next on each new vote screen — independent of the
-  // roster order so people can't game the pass-and-play sequence.
-  const voterOrder = useMemo(() => shuffle(aliveList), [aliveList]);
+  const aliveList = roster
+    .map((p, i) => ({ ...p, idx: i }))
+    .filter((p) => alive[p.idx]);
   const [votes, setVotes] = useState<Record<number, number>>({});
   const [voterPos, setVoterPos] = useState(0);
 
-  const voter = voterOrder[voterPos];
-  const isLast = voterPos === voterOrder.length - 1;
+  const voter = aliveList[voterPos];
+  const isLast = voterPos === aliveList.length - 1;
 
   const tally = useMemo(() => {
     const m: Record<number, number> = {};
