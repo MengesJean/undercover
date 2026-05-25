@@ -238,7 +238,12 @@ function ConfigureScreen({
     setPlayers(players.filter((_, idx) => idx !== i));
 
   const maxUnder = Math.max(0, Math.floor((players.length - 1) / 2));
-  const canStart = players.length >= 3 && numUndercover >= 1;
+  // At least one impostor is required, but it can be either an Undercover
+  // OR a Mr. White (or both).
+  const canStart =
+    players.length >= 3 && numUndercover + numMrWhite >= 1;
+  const minUnder = numMrWhite >= 1 ? 0 : 1;
+  const minWhite = numUndercover >= 1 ? 0 : 1;
 
   const colorFor = (name: string, i: number) => {
     const known = knownPlayers.find((p) => p.name === name);
@@ -393,8 +398,8 @@ function ConfigureScreen({
           subtitle="Un mot différent, mais proche"
           value={numUndercover}
           onChange={setNumUndercover}
-          min={1}
-          max={Math.max(1, maxUnder)}
+          min={minUnder}
+          max={Math.max(minUnder, maxUnder)}
         />
         <div className="h-[10px]" />
         <RolePicker
@@ -405,8 +410,8 @@ function ConfigureScreen({
           subtitle="Aucun mot — doit improviser"
           value={numMrWhite}
           onChange={setNumMrWhite}
-          min={0}
-          max={Math.max(0, players.length - 2 - numUndercover)}
+          min={minWhite}
+          max={Math.max(minWhite, players.length - 2 - numUndercover)}
         />
 
         {/* summary */}

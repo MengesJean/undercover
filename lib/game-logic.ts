@@ -27,8 +27,8 @@ export function assignRoles(
   if (playerNames.length < 3) {
     throw new Error("At least 3 players are required");
   }
-  if (numUndercover < 1) {
-    throw new Error("At least 1 undercover is required");
+  if (numUndercover + numMrWhite < 1) {
+    throw new Error("At least 1 impostor (undercover or Mr. White) is required");
   }
   if (numUndercover + numMrWhite >= playerNames.length) {
     throw new Error("Too many impostors for the player count");
